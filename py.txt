@@ -1,0 +1,604 @@
+
+import os
+from datetime import datetime, timezone
+
+import bcrypt
+import streamlit as st
+from dotenv import load_dotenv
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
+from bson.objectid import ObjectId
+
+# ---------------- PAGE CONFIGURATION ----------------
+
+st.set_page_config(
+    page_title="Blog Website",
+    page_icon="📝",
+    layout="wide"
+)
+
+load_dotenv()
+MONGO_URI = os.getenv("MONGO_URI")
+
+# ---------------- CUSTOM CSS ----------------
+
+st.markdown("""
+<style>
+.stApp {
+    background-color: #f4f8ff;
+    color: #172b4d;
+}
+[data-testid="stSidebar"] {
+    background-color: #dcecff;
+}
+.hero {
+    background: linear-gradient(120deg, #1677d2, #70baff);
+    color: white;
+    padding: 35px;
+    border-radius: 18px;
+    text-align: center;
+    margin-bottom: 25px;
+}
+.blog-card {
+    background: white;
+    padding: 22px;
+    border-radius: 14px;
+    border: 1px solid #d9e6f5;
+    margin-bottom: 15px;
+}
+h1, h2, h3 {
+    color: #123b66;
+}
+.stButton button {
+    background-color: #1677d2;
+    color: white;
+    border-radius: 9px;
+    border: none;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- DATABASE CONNECTION ----------------
+
+@st.cache_resource
+def connect_database(uri):
+    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    client.admin.command("ping")
+
+    db = client["blog_website"]
+    users = db["users"]
+    blogs = db["blogs"]
+
+    users.create_index("username", unique=True)
+    users.create_index("email", unique=True)
+    blogs.create_index([("created_at", -1)])
+
+    return users, blogs
+
+
+if not MONGO_URI:
+    st.error("MongoDB connection string is missing. Add MONGO_URI to your .env file.")
+    st.stop()
+
+try:
+    users, blogs = connect_database(MONGO_URI)
+except Exception as error:
+    st.error("Unable to connect to MongoDB. Check your connection string and Atlas network access.")
+    st.stop()
+
+# ---------------- SESSION STATE ----------------
+
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if "selected_blog" not in st.session_state:
+    st.session_state.selected_blog = None
+
+# ---------------- HELPER FUNCTIONS ----------------
+
+def register_user(username, email, password):
+    username = username.strip()
+    email = email.strip().lower()
+
+    if not username or not email or not password:
+        return False, "Please fill all fields."
+
+    if len(password) < 8:
+        return False, "Password must contain at least 8 characters."
+
+    hashed_password = bcrypt.hashpw(
+        password.encode("utf-8"),
+        bcrypt.gensalt()
+    )
+
+    try:
+        users.insert_one({
+            "username": username,
+            "email": email,
+            "password": hashed_password,
+            "created_at": datetime.now(timezone.utc)
+        })
+        return True, "Registration successful!"
+
+    except Exception:
+        return False, "Username or email already exists."
+
+
+def login_user(username, password):
+    user = users.find_one({
+        "username": username.strip()
+    })
+
+    if user and bcrypt.checkpw(
+        password.encode("utf-8"),
+        user["password"]
+    ):
+        return user
+
+    return None
+
+
+def create_blog(title, category, image, description, author):
+    blogs.insert_one({
+        "title": title.strip(),
+        "category": category,
+        "image": image.strip(),
+        "description": description.strip(),
+        "author": author,
+        "created_at": datetime.now(timezone.utc)
+    })
+
+
+def get_all_blogs(search=""):
+    query = {}
+
+    if search.strip():
+        query["$or"] = [
+            {"title": {"$regex": search, "$options": "i"}},
+            {"category": {"$regex": search, "$options": "i"}}
+        ]
+
+    return list(
+        blogs.find(query).sort("created_at", -1)
+    )
+
+
+def delete_blog(blog_id, username):
+    blogs.delete_one({
+        "_id": ObjectId(blog_id),
+        "author": username
+    })
+
+
+def update_blog(blog_id, title, category, image, description, username):
+    blogs.update_one(
+        {
+            "_id": ObjectId(blog_id),
+            "author": username
+        },
+        {
+            "$set": {
+                "title": title.strip(),
+                "category": category,
+                "image": image.strip(),
+                "description": description.strip()
+            }
+        }
+    )
+
+
+# ---------------- HEADER ----------------
+
+st.markdown("""
+<div class="hero">
+    <h1 style="color:white;">📝 My Blog Website</h1>
+    <p style="color:white;">
+        Share your ideas, stories and knowledge with the world.
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+# ---------------- AUTHENTICATION ----------------
+
+if st.session_state.user is None:
+
+    login_tab, register_tab = st.tabs(
+        ["🔐 Login", "📝 Register"]
+    )
+
+    with login_tab:
+        st.subheader("Welcome Back!")
+
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input(
+                "Password", type="password"
+            )
+            login_button = st.form_submit_button(
+                "Login", use_container_width=True
+            )
+
+        if login_button:
+            user = login_user(username, password)
+
+            if user:
+                st.session_state.user = user["username"]
+                st.success("Login successful!")
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+
+    with register_tab:
+        st.subheader("Create Your Account")
+
+        with st.form("register_form"):
+            new_username = st.text_input("Username")
+            new_email = st.text_input("Email")
+            new_password = st.text_input(
+                "Password", type="password"
+            )
+            confirm_password = st.text_input(
+                "Confirm Password", type="password"
+            )
+
+            register_button = st.form_submit_button(
+                "Register", use_container_width=True
+            )
+
+        if register_button:
+            if new_password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                success, message = register_user(
+                    new_username,
+                    new_email,
+                    new_password
+                )
+
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+
+    st.stop()
+
+
+# ---------------- LOGGED-IN DASHBOARD ----------------
+
+username = st.session_state.user
+
+st.sidebar.title("📝 Blog Dashboard")
+st.sidebar.success(f"Welcome, {username}!")
+
+page = st.sidebar.radio(
+    "Navigation",
+    [
+        "Home",
+        "All Blogs",
+        "Create Blog",
+        "My Blogs",
+        "Blog Details",
+        "Edit Blog"
+    ]
+)
+
+if st.sidebar.button("Logout", use_container_width=True):
+    st.session_state.user = None
+    st.session_state.selected_blog = None
+    st.rerun()
+
+
+# ---------------- HOME PAGE ----------------
+
+if page == "Home":
+
+    st.title("Welcome to Your Blog Dashboard")
+
+    all_blogs = get_all_blogs()
+    my_blogs = list(blogs.find({"author": username}))
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Total Blogs", len(all_blogs))
+    col2.metric("My Blogs", len(my_blogs))
+    col3.metric(
+        "Categories",
+        len(set(b["category"] for b in all_blogs))
+    )
+
+    st.subheader("Latest Blog Posts")
+
+    for blog in all_blogs[:4]:
+        with st.container(border=True):
+            if blog.get("image"):
+                st.image(blog["image"], width=300)
+
+            st.subheader(blog["title"])
+            st.caption(
+                f"By {blog['author']} | {blog['category']}"
+            )
+            st.write(blog["description"][:180] + "...")
+
+            if st.button(
+                "Read More",
+                key=f"home_{blog['_id']}"
+            ):
+                st.session_state.selected_blog = str(blog["_id"])
+                st.rerun()
+
+
+# ---------------- ALL BLOGS PAGE ----------------
+
+elif page == "All Blogs":
+
+    st.title("🌍 Explore All Blogs")
+
+    search = st.text_input("🔍 Search blogs by title or category")
+
+    all_blogs = get_all_blogs(search)
+
+    if not all_blogs:
+        st.info("No blogs found.")
+
+    for blog in all_blogs:
+
+        with st.container(border=True):
+
+            col1, col2 = st.columns([1, 2])
+
+            with col1:
+                if blog.get("image"):
+                    st.image(blog["image"], width=250)
+
+            with col2:
+                st.subheader(blog["title"])
+                st.caption(
+                    f"Author: {blog['author']} | Category: {blog['category']}"
+                )
+                st.write(blog["description"][:200] + "...")
+
+                if st.button(
+                    "View Details",
+                    key=f"all_{blog['_id']}"
+                ):
+                    st.session_state.selected_blog = str(blog["_id"])
+                    st.rerun()
+
+
+# ---------------- CREATE BLOG PAGE ----------------
+
+elif page == "Create Blog":
+
+    st.title("✍️ Create New Blog")
+
+    with st.form("create_blog_form"):
+
+        title = st.text_input("Blog Title")
+
+        category = st.selectbox(
+            "Select Category",
+            [
+                "Technology",
+                "Education",
+                "Travel",
+                "Food",
+                "Lifestyle",
+                "Business",
+                "Other"
+            ]
+        )
+
+        image = st.text_input(
+            "Image URL (optional)"
+        )
+
+        description = st.text_area(
+            "Write Your Blog",
+            height=250
+        )
+
+        submit = st.form_submit_button(
+            "Publish Blog",
+            use_container_width=True
+        )
+
+    if submit:
+
+        if not title.strip() or not description.strip():
+            st.error("Title and blog content are required.")
+
+        else:
+            try:
+                create_blog(
+                    title,
+                    category,
+                    image,
+                    description,
+                    username
+                )
+                st.success("Blog published successfully!")
+                st.rerun()
+
+            except PyMongoError:
+                st.error("Unable to save blog.")
+
+
+# ---------------- MY BLOGS PAGE ----------------
+
+elif page == "My Blogs":
+
+    st.title("📚 My Published Blogs")
+
+    my_blogs = list(
+        blogs.find({"author": username}).sort(
+            "created_at", -1
+        )
+    )
+
+    if not my_blogs:
+        st.info("You have not published any blogs yet.")
+
+    for blog in my_blogs:
+
+        with st.container(border=True):
+
+            st.subheader(blog["title"])
+            st.caption(blog["category"])
+
+            if blog.get("image"):
+                st.image(blog["image"], width=300)
+
+            st.write(blog["description"][:200] + "...")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                if st.button(
+                    "Edit Blog",
+                    key=f"edit_{blog['_id']}"
+                ):
+                    st.session_state.selected_blog = str(blog["_id"])
+                    st.rerun()
+
+            with col2:
+                if st.button(
+                    "Delete Blog",
+                    key=f"delete_{blog['_id']}"
+                ):
+                    delete_blog(str(blog["_id"]), username)
+                    st.success("Blog deleted.")
+                    st.rerun()
+
+
+# ---------------- INDIVIDUAL BLOG DETAILS ----------------
+
+elif page == "Blog Details":
+
+    st.title("📖 Blog Details")
+
+    if not st.session_state.selected_blog:
+        st.info("Select a blog from Home or All Blogs first.")
+
+    else:
+        try:
+            blog = blogs.find_one({
+                "_id": ObjectId(st.session_state.selected_blog)
+            })
+        except Exception:
+            blog = None
+
+        if not blog:
+            st.warning("Blog not found.")
+
+        else:
+            st.header(blog["title"])
+            st.caption(
+                f"Author: {blog['author']} | Category: {blog['category']}"
+            )
+
+            if blog.get("image"):
+                st.image(blog["image"], use_container_width=True)
+
+            st.divider()
+            st.write(blog["description"])
+
+            if st.button("Back to All Blogs"):
+                st.session_state.selected_blog = None
+                st.rerun()
+
+
+# ---------------- EDIT BLOG PAGE ----------------
+
+elif page == "Edit Blog":
+
+    st.title("✏️ Edit Your Blog")
+
+    blog_id = st.session_state.selected_blog
+
+    if not blog_id:
+        st.info("First select a blog from My Blogs.")
+
+    else:
+        try:
+            blog = blogs.find_one({
+                "_id": ObjectId(blog_id),
+                "author": username
+            })
+        except Exception:
+            blog = None
+
+        if not blog:
+            st.warning("Blog not found or you cannot edit it.")
+
+        else:
+            with st.form("edit_blog_form"):
+
+                title = st.text_input(
+                    "Blog Title",
+                    value=blog["title"]
+                )
+
+                categories = [
+                    "Technology",
+                    "Education",
+                    "Travel",
+                    "Food",
+                    "Lifestyle",
+                    "Business",
+                    "Other"
+                ]
+
+                category_index = (
+                    categories.index(blog["category"])
+                    if blog["category"] in categories else 6
+                )
+
+                category = st.selectbox(
+                    "Category",
+                    categories,
+                    index=category_index
+                )
+
+                image = st.text_input(
+                    "Image URL",
+                    value=blog.get("image", "")
+                )
+
+                description = st.text_area(
+                    "Blog Content",
+                    value=blog["description"],
+                    height=250
+                )
+
+                update = st.form_submit_button(
+                    "Update Blog",
+                    use_container_width=True
+                )
+
+            if update:
+
+                if not title.strip() or not description.strip():
+                    st.error("Title and content are required.")
+
+                else:
+                    update_blog(
+                        blog_id,
+                        title,
+                        category,
+                        image,
+                        description,
+                        username
+                    )
+                    st.success("Blog updated successfully!")
+                    st.rerun()
+
+
+# ---------------- FOOTER ----------------
+
+st.divider()
+
+st.markdown(
+    "<center>© 2026 My Blog Website | Built with Python, "
+    "Streamlit and MongoDB</center>",
+    unsafe_allow_html=True
+)
